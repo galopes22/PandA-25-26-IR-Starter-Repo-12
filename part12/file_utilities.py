@@ -1,0 +1,218 @@
+from __future__ import annotations
+from typing import List, Dict, Any
+import json
+import os
+
+import urllib.request
+import urllib.error
+
+from .models import Sonnet
+
+POETRYDB_URL = "https://poetrydb.org/author,title/Shakespeare;Sonnet"
+
+CACHE_FILENAME = "sonnets.json"
+
+class Setting:
+
+    def __init__(self, name: str, description: str, config_name: str, *options):
+        self.name = name
+        self.description = description
+        self.config_name = config_name
+        self.options = list(options)
+
+    def handle(self, user_input: str, config: Configuration):
+        if user_input.startswith(":" + self.name):
+            parts = user_input.split()
+            if len(parts) == 2 and parts[1].upper() in self.options:
+                config[self.config_name] = parts[1].upper()
+                print(self.config_name, "set to", config[self.config_name])
+                config.save()
+            else:
+                print("Usage: " + self.name + " " + "|".join(self.options))
+
+            return True
+
+        return False
+
+settings = [
+    Setting("highlight", "Highlighting", "highlight", "ON", "OFF"),
+    Setting("search-mode", "Search mode", "search_mode", "AND", "OR"),
+    Setting("hl-mode", "Highlight mode", "hl_mode", "DEFAULT", "GREEN")
+]
+
+
+class Configuration:
+    """
+        A small configuration container for user preferences in the IR system.
+        Stores two settings:
+          - highlight: whether matches should be highlighted using ANSI colors.
+          - search_mode: logical mode for combining multiple search terms ("AND" or "OR").
+    """
+    def __init__(self):
+        # Default settings used at program startup.
+        self.highlight = True
+        self.search_mode = "AND"
+        self.hl_mode = "DEFAULT"
+
+    def __setitem__(self, key, value):
+        if key == "highlight":
+            self.highlight = "ON" == value
+        elif key == "search_mode":
+            self.search_mode = value
+        elif key == "hl_mode":
+            self.hl_mode = value
+
+    def __getitem__(self, key):
+        if key == "highlight":
+            return self.highlight == "ON"
+        elif key == "search_mode":
+            return self.search_mode
+        elif key == "hl_mode":
+            return self.hl_mode
+        return None
+
+    def copy(self):
+        """
+            Return a *shallow copy* of this configuration object.
+            Useful when you want to pass config around without mutating the original.
+        """
+        copy = Configuration()
+        copy.highlight = self.highlight
+        copy.search_mode = self.search_mode
+        return copy
+
+    def update(self, other: Dict[str, Any]):
+        """
+            Update this configuration using values from a (loaded) dictionary.
+            Only accepts valid keys and types:
+              - "highlight": must be a boolean
+              - "search_mode": must be "AND" or "OR"
+
+            Invalid entries are silently ignored, ensuring robustness
+            against corrupted or manually edited config files.
+        """
+        if "highlight" in other and isinstance(other["highlight"], bool):
+            self.highlight = other["highlight"]
+
+        if "search_mode" in other and other["search_mode"] in ["AND", "OR"]:
+            self.search_mode = other["search_mode"]
+
+        if "hl_mode" in other and other["hl_mode"] in ["DEFAULT", "GREEN"]:
+            self.hl_mode = other["hl_mode"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "highlight": self.highlight,
+            "search_mode": self.search_mode,
+            "hl_mode": self.hl_mode,
+        }
+
+    def save(self: Configuration) -> None:
+        config_file_path = module_relative_path("config.json")
+
+        try:
+            with open(config_file_path, "w") as config_file:
+                json.dump(self.to_dict(), config_file, indent=4)
+        except OSError:
+            print(f"Writing config.json failed.")
+
+
+
+def module_relative_path(name: str) -> str:
+    """Return absolute path for a file next to this module."""
+    return os.path.join(os.path.dirname(__file__), name)
+
+def fetch_sonnets_from_api() -> List[Sonnet]:
+    """
+    Call the PoetryDB API (POETRYDB_URL), decode the JSON response and
+    convert it into a list of dicts.
+
+    - Use only the standard library (urllib.request).
+    - PoetryDB returns a list of poems.
+    - You can add error handling: raise a RuntimeError (or print a helpful message) if something goes wrong.
+    """
+    sonnets = []
+
+    try:
+        with urllib.request.urlopen(POETRYDB_URL, timeout=10) as response:
+            status = getattr(response, "status", None)
+            if status not in (None, 200):
+                raise RuntimeError(f"Request failed with HTTP status {status}")
+
+            try:
+                sonnets = json.load(response)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"Failed to decode JSON: {exc}") from exc
+
+    except (urllib.error.HTTPError,
+            urllib.error.URLError,
+            TimeoutError) as exc:
+        raise RuntimeError(f"Network-related error occurred: {exc}") from exc
+
+    return sonnets
+
+def load_sonnets() -> List[Sonnet]:
+    """
+    Load Shakespeare's sonnets with caching.
+
+    Behaviour:
+      1. If 'sonnets.json' already exists:
+           - Print: "Loaded sonnets from cache."
+           - Return the data.
+      2. Otherwise:
+           - Call fetch_sonnets_from_api() to load the data.
+           - Print: "Downloaded sonnets from PoetryDB."
+           - Save the data (pretty-printed) to CACHE_FILENAME.
+           - Return the data.
+    """
+    sonnets_path = module_relative_path(CACHE_FILENAME)
+
+    if os.path.exists(sonnets_path):
+        try:
+            with open(sonnets_path, "r", encoding="utf-8") as f:
+                try:
+                    sonnets = json.load(f)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"Corrupt cache file (invalid JSON): {exc}") from exc
+        except (OSError, IOError) as exc:
+            raise RuntimeError(f"Failed to read cache file: {exc}") from exc
+
+        print("Loaded sonnets from the cache.")
+    else:
+        sonnets = fetch_sonnets_from_api()
+        try:
+            with open(sonnets_path, "w", encoding="utf-8") as f:
+                try:
+                    json.dump(sonnets, f, indent=2, ensure_ascii=False)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(f"Failed to serialize JSON for cache: {exc}") from exc
+        except (OSError, IOError) as exc:
+            raise RuntimeError(f"Failed to write cache file: {exc}") from exc
+
+        print("Downloaded sonnets from PoetryDB.")
+
+    return [Sonnet(data) for data in sonnets]
+# ------------------------- Config handling ---------------------------------
+DEFAULT_CONFIG = Configuration()
+
+def load_config() -> Configuration:
+    config_file_path = module_relative_path("config.json")
+
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        with open(config_file_path) as config_file:
+            cfg.update(json.load(config_file))
+    except FileNotFoundError:
+        # File simply doesn't exist yet → quiet, just use defaults
+        print("No config.json found. Using default configuration.")
+        return cfg
+    except json.JSONDecodeError:
+        # File exists but is not valid JSON
+        print("config.json is invalid. Using default configuration.")
+        return cfg
+    except OSError:
+        # Any other OS / IO problem (permissions, disk issues, etc.)
+        print("Could not read config.json. Using default configuration.")
+        return cfg
+
+    return cfg
