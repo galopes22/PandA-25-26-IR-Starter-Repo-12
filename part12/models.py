@@ -1,12 +1,14 @@
 from __future__ import annotations
 from typing import List, Dict, Any, Tuple, Callable
+from nltk.stem import PorterStemmer
 
 
 class Sonnet:
     def __init__(self, sonnet_data: Dict[str, Any]):
         self.title = sonnet_data["title"]
         # ToDo 0: Make sure the sonnet has an attribute id that contains the number of the Sonnet as an int
-        # self.id =
+        sonnet_no_str = self.title.split(":")[0].split()[1]
+        self.id = int(sonnet_no_str)
         self.lines = sonnet_data["lines"]
 
     @staticmethod
@@ -50,10 +52,19 @@ class LineMatch:
         return LineMatch(self.line_no, self.text, self.spans)
 
 
+stemmer = PorterStemmer()
+
+def norm_and_stem(token: str) -> str:
+    token = token.lower()
+    token = token.replace("'", "").replace(",", "").replace(".", "")
+    token = stemmer.stem(token)
+    return token
+
 class Posting:
-    def __init__(self, line_no: int, position: int):
+    def __init__(self, line_no: int | None, position: int, original_token: str):
         self.line_no = line_no
         self.position = position
+        self.original_token = original_token
 
     def __repr__(self) -> str:
         return f"{self.line_no}:{self.position}"
@@ -66,7 +77,13 @@ class Index:
 
         for sonnet in sonnets:
             # ToDo 0: Copy the logic from your last solution
-            pass
+            for token, pos in self.tokenize(sonnet.title):
+                normalized_token = norm_and_stem(token)
+                self._add_token(sonnet.id, normalized_token, token, None, pos)
+            for line_no, line in enumerate(sonnet.lines):
+                for token, pos in self.tokenize(line):
+                    normalized_token = norm_and_stem(token)
+                    self._add_token(sonnet.id, normalized_token, token, line_no, pos)
 
     @staticmethod
     def tokenize(text):
@@ -92,18 +109,21 @@ class Index:
 
         return tokens
 
-    def _add_token(self, doc_id: int, token: str, line_no: int | None, position: int):
-        if token not in self.dictionary:
-            self.dictionary[token] = {}
+    def _add_token(self, doc_id: int, normalized_token: str, original_token: str, line_no: int | None, position: int):
+        if normalized_token not in self.dictionary:
+            self.dictionary[normalized_token] = {}
 
-        postings_list = self.dictionary[token]
+        postings_list = self.dictionary[normalized_token]
 
         if doc_id not in postings_list:
             postings_list[doc_id] = []
-        postings_list[doc_id].append(Posting(line_no, position))
+        postings_list[doc_id].append(Posting(line_no, position, original_token))
+
 
     def search_for(self, token: str) -> dict[int, SearchResult]:
         results = {}
+
+        token = norm_and_stem(token)
 
         if token in self.dictionary:
             postings_list = self.dictionary[token]
@@ -111,8 +131,33 @@ class Index:
                 for posting in postings:
                     sonnet = self.sonnets[doc_id]
 
+
                     # ToDo 0: Copy your solution from part 11
-                    result = None
+                    if posting.line_no is None:
+                        start = posting.position
+                        end = start + len(posting.original_token)
+                        result = SearchResult(
+                            title=sonnet.title,
+                            title_spans=[(start, end)],
+                            line_matches=[],
+                            matches=1
+                        )
+                    else:
+                        start = posting.position
+                        end = start + len(posting.original_token)
+
+                        lm = LineMatch(
+                            line_no=posting.line_no + 1,
+                            text=sonnet.lines[posting.line_no],
+                            spans=[(start, end)]
+                        )
+
+                        result = SearchResult(
+                            title=sonnet.title,
+                            title_spans=[],
+                            line_matches=[lm],
+                            matches=1
+                        )
 
                     if doc_id not in results:
                         results[doc_id] = result
@@ -128,13 +173,37 @@ class Searcher:
     def search(self, query: str, search_mode: str) -> List[SearchResult]:
         words = query.split()
 
-        combined_results = []
+        combined_results = {}
 
         for word in words:
             # Searching for the word in all sonnets
             results = self.index.search_for(word)
 
             # ToDo 0: Copy your solution from part 11
+            if not combined_results:
+                combined_results = results.copy()
+                continue
+
+            unseen_combined = {}
+
+            if search_mode.upper() == "AND":
+                for doc_id in combined_results:
+                    if doc_id in results:
+                        unseen_combined[doc_id] = combined_results[doc_id].combine_with(results[doc_id])
+            elif search_mode.upper() == "OR":
+                for doc_id in combined_results:
+                    if doc_id in results:
+                        unseen_combined[doc_id] = combined_results[doc_id].combine_with(results[doc_id])
+                    else:
+                        unseen_combined[doc_id] = combined_results[doc_id]
+
+                for doc_id in results:
+                    if doc_id not in unseen_combined:
+                        unseen_combined[doc_id] = results[doc_id]
+            else:
+                raise ValueError(f"Unknown search mode: {search_mode}")
+
+            combined_results = unseen_combined
 
         results = list(combined_results.values())
         return sorted(results, key=lambda sr: sr.title)
